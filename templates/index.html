@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Taplist</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" type="image/png" href="/mount/favicon.png">
+</head>
+
+<body>
+<h1>Taplist</h1>
+
+<!-- TAPS -->
+<div class="section-title">Beers on Tap</div>
+<div class="grid">
+    {% for b in data["taps"] %}
+    <div class="beer-card" style="background-color: {{ b.display_color_hex }}95;">
+        <div class="beer-number">{{ b.number }}</div>
+
+        <div class="beer-info">
+            <div class="beer-name">{{ b.name }}</div>
+            <div class="beer-style">{{ b.style }}</div>
+
+            {% if b.info %}
+            <div class="beer-extra">{{ b.info }}</div>
+            {% endif %}
+
+            <div class="beer-stats">
+                {% if b.display_ibu %}
+                <span>IBU: {{ b.display_ibu }}</span>
+                {% endif %}
+                {% if b.abv %}
+                <span>ABV: {{ b.abv }}%</span>
+                {% endif %}
+                {% if b.kcal %}
+                <span>{{ b.kcal }} kcal/100ml</span>
+                {% endif %}
+            </div>
+
+            {% if b.untappd %}
+            <div class="untappd-link"><a href="{{ b.untappd }}" target="_blank">Untappd →</a></div>
+            {% endif %}
+        </div>
+
+        <div class="beer-img">
+            {% if b.image %}
+            <img src="{{ b.image }}" alt="{{ b.name }}" class="clickable-img">
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- BOTTLES -->
+<div class="section-title">Bottles</div>
+<div class="grid">
+    {% for b in data["bottles"] %}
+    <div class="beer-card" style="background-color: {{ b.display_color_hex }}95;">
+        <div class="beer-number">{{ b.number }}</div>
+
+        <div class="beer-info">
+            <div class="beer-name">{{ b.name }}</div>
+            <div class="beer-style">{{ b.style }}</div>
+
+            {% if b.info %}
+            <div class="beer-extra">{{ b.info }}</div>
+            {% endif %}
+
+            <div class="beer-stats">
+                {% if b.display_ibu %}
+                <span>IBU: {{ b.display_ibu }}</span>
+                {% endif %}
+                {% if b.abv %}
+                <span>ABV: {{ b.abv }}%</span>
+                {% endif %}
+                {% if b.kcal %}
+                <span>{{ b.kcal }} kcal/100ml</span>
+                {% endif %}
+            </div>
+
+            {% if b.untappd %}
+            <div class="untappd-link"><a href="{{ b.untappd }}" target="_blank">Untappd →</a></div>
+            {% endif %}
+        </div>
+
+        <div class="beer-img">
+            {% if b.image %}
+            <img src="{{ b.image }}" alt="{{ b.name }}" class="clickable-img">
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- SPIRITS -->
+<div class="section-title">Spirits</div>
+<div class="grid">
+    {% for b in data["spirits"] %}
+    <div class="beer-card" style="background-color: {{ b.display_color_hex }}95;">
+        <div class="beer-info">
+            <div class="beer-name">{{ b.name }}</div>
+            <div class="beer-style">{{ b.style }}</div>
+
+            {% if b.info %}
+            <div class="beer-extra">{{ b.info }}</div>
+            {% endif %}
+
+            <div class="beer-stats">
+                {% if b.abv %}
+                <span>ABV: {{ b.abv }}%</span>
+                {% endif %}
+                {% if b.kcal %}
+                <span>{{ b.kcal }} kcal/100ml</span>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="beer-img">
+            {% if b.image %}
+            <img src="{{ b.image }}" alt="{{ b.name }}" class="clickable-img">
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- Fullscreen overlay -->
+<div id="img-overlay" class="img-overlay">
+    <span id="overlay-close" class="overlay-close">&times;</span>
+    <img id="overlay-img" class="overlay-img">
+</div>
+
+<script>
+document.querySelectorAll('.clickable-img').forEach(img => {
+    img.addEventListener('click', () => {
+        const overlay = document.getElementById('img-overlay');
+        const overlayImg = document.getElementById('overlay-img');
+        overlay.style.display = 'flex';
+        overlayImg.src = img.src;
+    });
+});
+
+document.getElementById('overlay-close').addEventListener('click', () => {
+    document.getElementById('img-overlay').style.display = 'none';
+});
+</script>
+
+</body>
+</html>

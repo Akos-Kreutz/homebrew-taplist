@@ -1,0 +1,34 @@
+{
+    "taps": [
+        {
+            "number": 1,
+            "color": 12.9,
+            "abv": 5.9,
+            "ibu": 37,
+            "image": "/mount/img/tap1.png",
+            "name": "Test Tap Beer",
+            "style": "Czech Amber Lager",
+            "kcal": 10
+        }
+    ],
+    "bottles": [
+        {
+            "number": 116,
+            "color": 6.7,
+            "abv": 9.5,
+            "ibu": 55,
+            "image": "/mount/img/bottle.png",
+            "name": "Test Bottle Beer",
+            "style": "Saison",
+            "info": "Belgian Saison made for testing."
+        }
+    ],
+    "spirits": [
+        {
+            "abv": 43,
+            "image": "/mount/img/whiskey.jpg",
+            "name": "Test - Whiskey",
+            "style": "Whiskey"
+        }
+    ]
+}
