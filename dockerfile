@@ -1,4 +1,6 @@
-FROM python:3.11-slim
+FROM python:3.14.2-alpine3.23
+
+RUN apk upgrade --no-cache
 
 RUN pip install --upgrade pip
 
