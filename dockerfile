@@ -4,7 +4,7 @@ RUN apk upgrade --no-cache
 
 RUN pip install --upgrade pip
 
-RUN pip install --no-cache-dir flask
+RUN pip install --no-cache-dir flask flask-login
 
 WORKDIR /app
 

@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="row">
+
+    <!-- LEFT COLUMN -->
+    <div class="col-lg-6">
+
+        <div class="card shadow mb-4">
+            <div class="card-body">
+                <h5 class="card-title">Add Beverage</h5>
+
+                <form method="POST"
+                      action="{{ url_for('add_item') }}"
+                      enctype="multipart/form-data">
+
+                    <div class="mb-3">
+                        <label class="form-label">Category</label>
+                        <select name="category"
+                                class="form-select"
+                                required>
+                            <option value="taps">Taps</option>
+                            <option value="bottles">Bottles</option>
+                            <option value="spirits">Spirits</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Name</label>
+                        <input type="text"
+                               name="name"
+                               class="form-control"
+                               required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Style</label>
+                        <input type="text"
+                               name="style"
+                               class="form-control">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Untappd link</label>
+                        <input type="URL"
+                               name="untappd"
+                               class="form-control">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Image</label>
+                        <input type="file"
+                               name="image_file"
+                               class="form-control"
+                               accept="image/png,image/jpeg,image/webp"
+                               required>
+                    </div>
+
+                    <div class="row">
+                        <div class="col">
+                            <label class="form-label">ABV</label>
+                            <input type="number" step="0.1"
+                                   name="abv"
+                                   class="form-control">
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Number</label>
+                            <input type="number"
+                                   name="number"
+                                   class="form-control">
+                        </div>
+                    </div>
+
+                    <div class="row mt-3">
+                        <div class="col">
+                            <label class="form-label">Color</label>
+                            <input type="number" step="0.1"
+                                   name="color"
+                                   class="form-control">
+                        </div>
+                        <div class="col">
+                            <label class="form-label">IBU</label>
+                            <input type="number"
+                                   name="ibu"
+                                   class="form-control">
+                        </div>
+                    </div>
+
+                    <div class="row mt-3">
+                        <div class="col">
+                            <label class="form-label">Kcal</label>
+                            <input type="number"
+                                   name="kcal"
+                                   class="form-control">
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Info</label>
+                            <input type="text"
+                                   name="info"
+                                   class="form-control">
+                        </div>
+                    </div>
+
+                    <div class="mt-3">
+                        <button type="submit"
+                                class="btn btn-primary w-100">
+                            Add Item
+                        </button>
+                    </div>
+
+                </form>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- RIGHT COLUMN -->
+<div class="col-lg-6">
+
+    <!-- Delete Beverage -->
+    <div class="card shadow mb-4">
+        <div class="card-body">
+            <h5 class="card-title">Delete Beverage</h5>
+
+            <form method="POST" action="{{ url_for('delete_item') }}">
+
+                <div class="mb-3">
+                    <label class="form-label">Category</label>
+                    <select name="category"
+                            id="delete-category"
+                            class="form-select"
+                            required>
+                        <option value="taps">Taps</option>
+                        <option value="bottles">Bottles</option>
+                        <option value="spirits">Spirits</option>
+                    </select>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">Name</label>
+                    <select name="name"
+                            id="delete-name"
+                            class="form-select"
+                            required>
+                        <!-- Populated by JavaScript -->
+                    </select>
+                </div>
+
+                <button type="submit"
+                        class="btn btn-danger w-100">
+                    Delete Item
+                </button>
+
+            </form>
+        </div>
+    </div>
+
+    <!-- Replace Background -->
+    <div class="card shadow mb-4">
+        <div class="card-body">
+            <h5 class="card-title">Update Background Image</h5>
+
+            <form action="{{ url_for('update_background_image') }}"
+                  method="POST"
+                  enctype="multipart/form-data">
+
+                <div class="mb-3">
+                    <input type="file"
+                           name="background_file"
+                           class="form-control"
+                           accept="image/png"
+                           required>
+                </div>
+
+                <button type="submit"
+                        class="btn btn-outline-dark w-100">
+                    Update Background
+                </button>
+
+            </form>
+        </div>
+    </div>
+
+    <!-- Replace Favicon -->
+    <div class="card shadow">
+        <div class="card-body">
+            <h5 class="card-title">Update Favicon</h5>
+
+            <form action="{{ url_for('update_favicon') }}"
+                  method="POST"
+                  enctype="multipart/form-data">
+
+                <div class="mb-3">
+                    <input type="file"
+                           name="favicon_file"
+                           class="form-control"
+                           accept="image/png"
+                           required>
+                </div>
+
+                <button type="submit"
+                        class="btn btn-outline-dark w-100">
+                    Update Favicon
+                </button>
+
+            </form>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    const drinks = {{ drinks | tojson }};
+
+    const categorySelect = document.getElementById('delete-category');
+    const nameSelect = document.getElementById('delete-name');
+
+    function populateNames() {
+        const category = categorySelect.value;
+        nameSelect.innerHTML = "";
+
+        if (!drinks[category]) return;
+
+        drinks[category].forEach(item => {
+            const option = document.createElement("option");
+            option.value = item.name;
+            option.textContent = item.name;
+            nameSelect.appendChild(option);
+        });
+    }
+
+    categorySelect.addEventListener('change', populateNames);
+
+    populateNames();
+</script>
+
+{% endblock %}
