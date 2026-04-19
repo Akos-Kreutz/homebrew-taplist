@@ -1,4 +1,4 @@
-FROM kreutzakos/python-base:latest
+FROM python:3.14.4-slim-trixie
 
 USER root
 
