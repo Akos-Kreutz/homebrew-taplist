@@ -1,6 +1,9 @@
-FROM python:3.14.2-alpine3.23
+FROM kreutzakos/python-base:latest
 
-RUN apk upgrade --no-cache
+USER root
+
+RUN apt update \
+    && apt upgrade -y --no-install-recommends
 
 RUN pip install --upgrade pip
 
@@ -14,6 +17,10 @@ COPY templates ./templates
 COPY static ./static
 COPY mount ./mount
 
+RUN chown -R pythonuser:pythonuser /app
+
 EXPOSE 80
+
+USER pythonuser
 
 CMD ["python", "app.py"]
