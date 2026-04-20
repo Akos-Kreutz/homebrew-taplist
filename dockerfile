@@ -17,10 +17,6 @@ COPY templates ./templates
 COPY static ./static
 COPY mount ./mount
 
-RUN chown -R pythonuser:pythonuser /app
-
 EXPOSE 80
-
-USER pythonuser
 
 CMD ["python", "app.py"]
