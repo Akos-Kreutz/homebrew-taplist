@@ -13,6 +13,7 @@
                 <form method="POST"
                       action="{{ url_for('add_item') }}"
                       enctype="multipart/form-data">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
                     <div class="mb-3">
                         <label class="form-label">Category</label>
@@ -123,6 +124,7 @@
             <h5 class="card-title">Delete Beverage</h5>
 
             <form method="POST" action="{{ url_for('delete_item') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
                 <div class="mb-3">
                     <label class="form-label">Category</label>
@@ -163,6 +165,7 @@
             <form action="{{ url_for('update_background_image') }}"
                   method="POST"
                   enctype="multipart/form-data">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
                 <div class="mb-3">
                     <input type="file"
@@ -189,6 +192,7 @@
             <form action="{{ url_for('update_favicon') }}"
                   method="POST"
                   enctype="multipart/form-data">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
                 <div class="mb-3">
                     <input type="file"
@@ -209,7 +213,7 @@
 
 </div>
 
-<script>
+<script nonce="{{ csp_nonce }}">
     const drinks = {{ drinks | tojson }};
 
     const categorySelect = document.getElementById('delete-category');
