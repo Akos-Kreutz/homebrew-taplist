@@ -1,0 +1,13 @@
+# Keep the build context to what the image needs
+.git
+.github
+.dockerignore
+.docker
+example
+*.md
+LICENSE
+requirements.in
+**/__pycache__
+**/*.pyc
+.env
+*.env

@@ -38,7 +38,7 @@
             </div>
 
             {% if b.untappd %}
-            <div class="untappd-link"><a href="{{ b.untappd }}" target="_blank">Untappd →</a></div>
+            <div class="untappd-link"><a href="{{ b.untappd }}" target="_blank" rel="noopener noreferrer">Untappd →</a></div>
             {% endif %}
         </div>
 
@@ -79,7 +79,7 @@
             </div>
 
             {% if b.untappd %}
-            <div class="untappd-link"><a href="{{ b.untappd }}" target="_blank">Untappd →</a></div>
+            <div class="untappd-link"><a href="{{ b.untappd }}" target="_blank" rel="noopener noreferrer">Untappd →</a></div>
             {% endif %}
         </div>
 
@@ -130,7 +130,7 @@
     <img id="overlay-img" class="overlay-img">
 </div>
 
-<script>
+<script nonce="{{ csp_nonce }}">
 document.querySelectorAll('.clickable-img').forEach(img => {
     img.addEventListener('click', () => {
         const overlay = document.getElementById('img-overlay');

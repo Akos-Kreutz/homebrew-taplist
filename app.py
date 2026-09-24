@@ -1,39 +1,169 @@
 import os
+import io
+import hmac
+import math
+import secrets
+import tempfile
+import threading
+from datetime import timedelta
 from pathlib import Path
 import re
+from urllib.parse import urlparse
 from flask import (
-    Flask, render_template, request, json,
-    redirect, url_for, flash, send_from_directory
+    Flask, render_template, request, json, g, session,
+    redirect, url_for, flash, send_from_directory, abort
 )
 from flask_login import (
     LoginManager, UserMixin,
     login_user, login_required,
     logout_user, current_user
 )
-from werkzeug.utils import secure_filename
+from flask_wtf.csrf import CSRFProtect
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
+from PIL import Image
+
+# --------------------
+# Secrets
+# --------------------
+
+INSECURE_DEFAULTS = {"", "CHANGE_ME_NOW", "password", "admin", "changeme"}
+
+def get_secret(name, required=True):
+    """
+    Read a secret from NAME or from the file referenced by NAME_FILE
+    (e.g. a Docker secret mounted under /run/secrets).
+    """
+    file_path = os.environ.get(f"{name}_FILE")
+    if file_path:
+        value = Path(file_path).read_text().strip()
+    else:
+        value = os.environ.get(name, "").strip()
+
+    if required and value in INSECURE_DEFAULTS:
+        raise RuntimeError(
+            f"{name} (or {name}_FILE) must be set to a non-default value"
+        )
+
+    return value or None
 
 # --------------------
 # App Setup
 # --------------------
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "CHANGE_ME_NOW")
+app.secret_key = get_secret("SECRET_KEY")
 
-ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+if len(app.secret_key) < 32:
+    raise RuntimeError("SECRET_KEY must be at least 32 characters long")
+
+# Number of reverse proxies in front of the app (0 = none). Needed so the
+# login rate limit and session protection see the real client IP.
+TRUSTED_PROXIES = int(os.environ.get("TRUSTED_PROXIES", "0"))
+if TRUSTED_PROXIES > 0:
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app, x_for=TRUSTED_PROXIES, x_proto=TRUSTED_PROXIES
+    )
+
+csrf = CSRFProtect(app)
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    storage_uri="memory://",
+)
+
+# Extension -> Pillow format the file content must actually have
+IMAGE_FORMATS = {
+    ".png": "PNG",
+    ".jpg": "JPEG",
+    ".jpeg": "JPEG",
+    ".gif": "GIF",
+    ".webp": "WEBP",
+}
+ALLOWED_IMAGE_EXTENSIONS = set(IMAGE_FORMATS)
+
+# Reject decompression bombs (tiny files that expand to huge bitmaps)
+MAX_IMAGE_PIXELS = 40_000_000
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 SRM_FILE = Path("srm_colors.json")
 
 MOUNT_DIR = Path("mount")
 DRINKS_FILE = MOUNT_DIR / "drinks.json"
 IMG_DIR = MOUNT_DIR / "img"
+IMG_URL_PREFIX = "/mount/img/"
 BACKGROUND_FILE = MOUNT_DIR / "background.png"
 FAVICON_FILE = MOUNT_DIR / "favicon.png"
 
-PNG_EXTENSION = ".png"
-PNG_MIMETYPE = "image/png"
 BEVERAGE_CATEGORIES = ("taps", "bottles", "spirits")
+HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+# Form field -> (type, min, max)
+NUMERIC_FIELDS = {
+    "number": (int, 0, 99999),
+    "abv": (float, 0, 100),
+    "color": (float, 0, 50),  # SRM, matches srm_colors.json
+    "ibu": (int, 0, 1000),
+    "kcal": (int, 0, 10000),
+}
+MAX_TEXT_LENGTH = 200
+MAX_INFO_LENGTH = 1000
+
+# Serializes read-modify-write of drinks.json across gunicorn threads
+DRINKS_LOCK = threading.Lock()
 
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB limit
+
+# ---- Session cookie hardening ----
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    # Only enable when served over HTTPS, otherwise the browser drops the cookie
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true",
+    PERMANENT_SESSION_LIFETIME=timedelta(
+        hours=int(os.environ.get("SESSION_LIFETIME_HOURS", "8"))
+    ),
+)
+
+# ---- Security headers ----
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self' 'nonce-{nonce}'; "
+    # Inline style attributes are used for the card colors
+    "style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+@app.before_request
+def set_csp_nonce():
+    g.csp_nonce = secrets.token_urlsafe(16)
+
+@app.context_processor
+def inject_csp_nonce():
+    return {"csp_nonce": g.get("csp_nonce", "")}
+
+@app.after_request
+def set_security_headers(response):
+    response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY.format(
+        nonce=g.get("csp_nonce", "")
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+
+    if request.path.startswith(("/admin", "/login")):
+        response.headers["Cache-Control"] = "no-store"
+
+    return response
 
 # --------------------
 # Authentication Setup
@@ -41,10 +171,16 @@ app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB limit
 
 login_manager = LoginManager()
 login_manager.login_view = "login"
+login_manager.session_protection = "strong"
 login_manager.init_app(app)
 
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
-ADMIN_PASS = os.environ.get("ADMIN_PASS", "password")
+
+# Prefer a pre-hashed password (ADMIN_PASS_HASH), fall back to hashing ADMIN_PASS
+# at startup so the plaintext is never kept around or compared directly.
+ADMIN_PASS_HASH = get_secret("ADMIN_PASS_HASH", required=False)
+if not ADMIN_PASS_HASH:
+    ADMIN_PASS_HASH = generate_password_hash(get_secret("ADMIN_PASS"))
 
 class User(UserMixin):
     def __init__(self, username):
@@ -52,7 +188,9 @@ class User(UserMixin):
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User(user_id)
+    if user_id is not None and hmac.compare_digest(user_id, ADMIN_USER):
+        return User(user_id)
+    return None
 
 # --------------------
 # Public Routes
@@ -80,20 +218,31 @@ def index():
 # --------------------
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per minute; 20 per hour", methods=["POST"])
 def login():
     if request.method == "POST":
-        username = request.form.get("username")
-        password = request.form.get("password")
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
 
-        if username == ADMIN_USER and password == ADMIN_PASS:
-            login_user(User(username))
+        # Always run the hash check so timing does not reveal a valid username
+        user_ok = hmac.compare_digest(username, ADMIN_USER)
+        pass_ok = check_password_hash(ADMIN_PASS_HASH, password)
+
+        if user_ok and pass_ok:
+            session.permanent = True
+            login_user(User(ADMIN_USER))
             return redirect(url_for("admin"))
 
         flash("Invalid credentials")
 
     return render_template("login.html")
 
-@app.route("/logout")
+@app.errorhandler(429)
+def too_many_requests(e):
+    flash("Too many login attempts, try again later")
+    return render_template("login.html"), 429
+
+@app.route("/logout", methods=["POST"])
 @login_required
 def logout():
     logout_user()
@@ -125,47 +274,29 @@ def delete_item():
     category = request.form.get("category")
     name = request.form.get("name")
 
-    if category not in ["taps", "bottles", "spirits"]:
+    if category not in BEVERAGE_CATEGORIES:
         flash("Invalid category")
         return redirect(url_for("admin"))
 
-    data = load_drinks()
+    with DRINKS_LOCK:
+        data = load_drinks()
 
-    image_to_check = None
-    new_list = []
+        # ---- Remove item and capture its image path ----
+        removed = [item for item in data[category] if item.get("name") == name]
 
-    # ---- Remove item and capture image path ----
-    for item in data[category]:
-        if item.get("name") == name:
-            image_to_check = item.get("image")
-        else:
-            new_list.append(item)
+        if not removed:
+            flash("Item not found")
+            return redirect(url_for("admin"))
 
-    if image_to_check is None:
-        flash("Item not found")
-        return redirect(url_for("admin"))
+        data[category] = [
+            item for item in data[category] if item.get("name") != name
+        ]
 
-    data[category] = new_list
+        save_drinks(data)
 
-    # ---- Check if image still used elsewhere ----
-    image_still_used = False
+        for item in removed:
+            delete_image_if_unused(data, item.get("image"))
 
-    for cat in ["taps", "bottles", "spirits"]:
-        for item in data[cat]:
-            if item.get("image") == image_to_check:
-                image_still_used = True
-                break
-
-    # ---- Delete image if unused ----
-    if not image_still_used and image_to_check:
-        # image_to_check looks like "/mount/img/file.png"
-        filename = Path(image_to_check).name
-        file_path = IMG_DIR / filename
-
-        if file_path.exists():
-            file_path.unlink()
-
-    save_drinks(data)
     flash("Item deleted")
 
     return redirect(url_for("admin"))
@@ -179,17 +310,27 @@ def add_item():
     if category not in BEVERAGE_CATEGORIES:
         flash("Invalid category")
         return redirect(url_for("admin"))
-    
-    if not request.form.get("name"):
-        flash("Name is required")
-        return redirect(url_for("admin"))
-    
-    if category == "taps":
-        if not request.form.get("number"):
-            flash("Number is required")
-            return redirect(url_for("admin"))
 
-    data = load_drinks()
+    try:
+        name = parse_text("name", required=True)
+        style = parse_text("style")
+        info = parse_text("info", max_length=MAX_INFO_LENGTH)
+        untappd = parse_text("untappd")
+
+        if untappd and not is_safe_untappd_url(untappd):
+            raise ValueError("Untappd link must be an https://untappd.com URL")
+
+        numbers = {
+            field: parse_number(field, cast, low, high)
+            for field, (cast, low, high) in NUMERIC_FIELDS.items()
+        }
+    except ValueError as e:
+        flash(str(e))
+        return redirect(url_for("admin"))
+
+    if category == "taps" and numbers["number"] is None:
+        flash("Number is required")
+        return redirect(url_for("admin"))
 
     # ---------- Image Upload ----------
     image_file = request.files.get("image_file")
@@ -204,95 +345,68 @@ def add_item():
         flash("Invalid image type")
         return redirect(url_for("admin"))
 
-    # ---- Generate safe filename from beverage name ----
-    raw_name = request.form.get("name", "")
-
-    if not raw_name.strip():
-        flash("Name is required")
+    image_bytes = sanitize_image(image_file, IMAGE_FORMATS[original_ext])
+    if image_bytes is None:
+        flash("Image content is invalid or does not match its extension")
         return redirect(url_for("admin"))
 
-    # Normalize
-    safe_name = raw_name.strip().lower()
-
-    # Replace whitespace with underscore
-    safe_name = re.sub(r"\s+", "_", safe_name)
-
-    # Remove non-alphanumeric (keep underscore and dash)
+    # ---- Generate safe filename from beverage name ----
+    # Normalize, replace whitespace with underscore,
+    # remove non-alphanumeric (keep underscore and dash)
+    safe_name = re.sub(r"\s+", "_", name.lower())
     safe_name = re.sub(r"[^a-z0-9_-]", "", safe_name)
 
     if not safe_name:
         flash("Invalid beverage name")
         return redirect(url_for("admin"))
 
-    filename = f"{safe_name}{original_ext}"
-    save_path = IMG_DIR / filename
-
-    # ---- Prevent overwrite by adding suffix ----
-    counter = 1
-    while save_path.exists():
-        filename = f"{safe_name}_{counter}{original_ext}"
-        save_path = IMG_DIR / filename
-        counter += 1
-
-    image_file.save(save_path)
-
-    image_path = f"/mount/img/{filename}"
-
     # ---------- Build Item ----------
-    item = {
-        "name": request.form.get("name"),
-        "style": request.form.get("style"),
-        "image": image_path,
-    }
+    item = {"name": name, "style": style}
 
-    # Attribute mapping
-    if request.form.get("abv"):
-        item["abv"] = float(request.form.get("abv"))
+    if untappd:
+        item["untappd"] = untappd
 
-    if request.form.get("untappd"):
-        item["untappd"] = request.form.get("untappd")
+    if info:
+        item["info"] = info
 
-    if request.form.get("number"):
-        item["number"] = int(request.form.get("number"))
+    for field, value in numbers.items():
+        if value is not None:
+            item[field] = value
 
-    if request.form.get("color"):
-        item["color"] = float(request.form.get("color"))
+    with DRINKS_LOCK:
+        # ---- Prevent overwrite by adding suffix ----
+        filename = f"{safe_name}{original_ext}"
+        save_path = IMG_DIR / filename
+        counter = 1
+        while save_path.exists():
+            filename = f"{safe_name}_{counter}{original_ext}"
+            save_path = IMG_DIR / filename
+            counter += 1
 
-    if request.form.get("ibu"):
-        item["ibu"] = int(request.form.get("ibu"))
+        save_path.write_bytes(image_bytes)
+        item["image"] = f"{IMG_URL_PREFIX}{filename}"
 
-    if request.form.get("info"):
-        item["info"] = request.form.get("info")
+        data = load_drinks()
 
-    if request.form.get("kcal"):
-        item["kcal"] = int(request.form.get("kcal"))
+        # ---------- Tap Override ----------
+        replaced_images = []
+        if category == "taps":
+            replaced_images = [
+                t.get("image") for t in data["taps"]
+                if t.get("number") == item["number"]
+            ]
+            data["taps"] = [
+                t for t in data["taps"]
+                if t.get("number") != item["number"]
+            ]
 
-    # ---------- Tap Override ----------
-    if category == "taps" and "number" in item:
-        existing_tap = next(
-            (t for t in data["taps"] if t.get("number") == item["number"]),
-            None
-        )
+        data[category].append(item)
+        save_drinks(data)
 
-        if existing_tap:
-            # Delete existing image file
-            image_path = existing_tap.get("image")
-            if image_path:
-                filename = os.path.basename(image_path)
-                full_path = os.path.join(IMG_DIR, filename)
+        # Only remove the old tap's image if no other item still uses it
+        for image in replaced_images:
+            delete_image_if_unused(data, image)
 
-                if os.path.exists(full_path):
-                    os.remove(full_path)
-
-        # Remove old tap entry
-        data["taps"] = [
-            t for t in data["taps"]
-            if t.get("number") != item["number"]
-        ]
-
-    data[category].append(item)
-
-    save_drinks(data)
     flash("Item added successfully")
 
     return redirect(url_for("admin"))
@@ -306,15 +420,16 @@ def update_background_image():
         flash("No file selected")
         return redirect(url_for("admin"))
 
-    if Path(file.filename).suffix.lower() != PNG_EXTENSION:
+    if Path(file.filename).suffix.lower() != ".png":
         flash("Only PNG files are allowed")
         return redirect(url_for("admin"))
 
-    if file.mimetype != PNG_MIMETYPE:
-        flash("Invalid file type")
+    image_bytes = sanitize_image(file, "PNG")
+    if image_bytes is None:
+        flash("File is not a valid PNG image")
         return redirect(url_for("admin"))
 
-    file.save(BACKGROUND_FILE)
+    BACKGROUND_FILE.write_bytes(image_bytes)
     flash("Background updated successfully")
 
     return redirect(url_for("admin"))
@@ -328,15 +443,16 @@ def update_favicon():
         flash("No file selected")
         return redirect(url_for("admin"))
 
-    if Path(file.filename).suffix.lower() != PNG_EXTENSION:
+    if Path(file.filename).suffix.lower() != ".png":
         flash("Only PNG files are allowed")
         return redirect(url_for("admin"))
 
-    if file.mimetype != PNG_MIMETYPE:
-        flash("Invalid file type")
+    image_bytes = sanitize_image(file, "PNG")
+    if image_bytes is None:
+        flash("File is not a valid PNG image")
         return redirect(url_for("admin"))
 
-    file.save(FAVICON_FILE)
+    FAVICON_FILE.write_bytes(image_bytes)
     flash("Favicon updated successfully")
 
     return redirect(url_for("admin"))
@@ -347,15 +463,116 @@ def update_favicon():
 
 @app.route("/mount/<path:filename>")
 def mounted_files(filename):
+    # Only serve images; keeps drinks.json and anything else in mount/ private
+    if Path(filename).suffix.lower() not in ALLOWED_IMAGE_EXTENSIONS:
+        abort(404)
     return send_from_directory(MOUNT_DIR, filename)
+
+def sanitize_image(file_storage, expected_format):
+    """
+    Check that the upload really is an image of expected_format and return
+    it re-encoded (drops metadata and anything appended to the image data).
+    Returns None if the file is not a valid image.
+    """
+    data = file_storage.read()
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            if img.format != expected_format:
+                return None
+            if img.width * img.height > MAX_IMAGE_PIXELS:
+                return None
+            img.verify()
+
+        # verify() leaves the image unusable, so open it again to re-encode
+        with Image.open(io.BytesIO(data)) as img:
+            out = io.BytesIO()
+            save_args = {"format": expected_format}
+
+            if getattr(img, "is_animated", False):
+                save_args["save_all"] = True
+            if expected_format == "JPEG":
+                save_args["quality"] = "keep"
+
+            img.save(out, **save_args)
+            return out.getvalue()
+
+    except (Image.DecompressionBombError, OSError, SyntaxError, ValueError):
+        return None
 
 def load_drinks():
     with open(DRINKS_FILE, "r") as f:
         return json.load(f)
 
 def save_drinks(data):
-    with open(DRINKS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    """
+    Write drinks.json atomically: write a temp file in the same directory,
+    then rename it over the original so readers never see a partial file.
+    """
+    fd, tmp_path = tempfile.mkstemp(
+        dir=DRINKS_FILE.parent, prefix=".drinks-", suffix=".json.tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        # mkstemp creates the file as 0600, keep the original permissions
+        if DRINKS_FILE.exists():
+            os.chmod(tmp_path, DRINKS_FILE.stat().st_mode & 0o777)
+
+        os.replace(tmp_path, DRINKS_FILE)
+    except BaseException:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+
+def delete_image_if_unused(data, image):
+    """
+    Delete an uploaded image unless another beverage still references it.
+    Only files the admin page uploaded (under /mount/img/) are ever removed.
+    """
+    if not image or not image.startswith(IMG_URL_PREFIX):
+        return
+
+    if any(
+        item.get("image") == image
+        for category in BEVERAGE_CATEGORIES
+        for item in data.get(category, [])
+    ):
+        return
+
+    file_path = IMG_DIR / Path(image).name
+    file_path.unlink(missing_ok=True)
+
+def parse_text(field, required=False, max_length=MAX_TEXT_LENGTH):
+    value = request.form.get(field, "").strip()
+
+    if required and not value:
+        raise ValueError(f"{field.capitalize()} is required")
+    if len(value) > max_length:
+        raise ValueError(f"{field.capitalize()} must be at most {max_length} characters")
+
+    return value or None
+
+def parse_number(field, cast, low, high):
+    """
+    Parse an optional numeric form field. Raises ValueError with a
+    user-facing message for non-numbers, NaN/inf and out-of-range values.
+    """
+    raw = request.form.get(field, "").strip()
+    if not raw:
+        return None
+
+    try:
+        value = cast(raw)
+    except ValueError:
+        raise ValueError(f"{field.upper()} must be a number") from None
+
+    if not math.isfinite(value) or not low <= value <= high:
+        raise ValueError(f"{field.upper()} must be between {low} and {high}")
+
+    return value
 
 def load_srm_map():
     with SRM_FILE.open() as f:
@@ -369,8 +586,29 @@ def srm_to_hex(srm_value, srm_map):
     closest = min(keys, key=lambda x: abs(x - srm_value))
     return srm_map[f"{closest:.1f}"]
 
+def is_safe_untappd_url(url):
+    """
+    Only allow http(s) links pointing to untappd.com, blocking
+    javascript:/data: URLs that would execute in the guest's browser.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    host = (parsed.hostname or "").lower()
+
+    return (
+        parsed.scheme in ("http", "https")
+        and (host == "untappd.com" or host.endswith(".untappd.com"))
+    )
+
 def normalize_drink(d, srm_map):
     d["display_ibu"] = d.get("ibu")
+
+    # drinks.json can also be edited by hand, so re-check links on render
+    if d.get("untappd") and not is_safe_untappd_url(d["untappd"]):
+        d["untappd"] = None
 
     color_field = d.get("color")
     srm_field = d.get("srm")
@@ -386,7 +624,7 @@ def normalize_drink(d, srm_map):
         display_srm = float(srm_field)
         color_hex = srm_to_hex(display_srm, srm_map)
 
-    elif isinstance(color_field, str):
+    elif isinstance(color_field, str) and HEX_COLOR_RE.fullmatch(color_field):
         color_hex = color_field
 
     if not color_hex:
@@ -400,4 +638,4 @@ def normalize_drink(d, srm_map):
 # --------------------
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=80, debug=False)
+    app.run(host="0.0.0.0", port=8080, debug=False)
