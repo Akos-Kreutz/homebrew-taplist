@@ -18,13 +18,30 @@ These environment variables are used for configuration. The application refuses 
 
 Every secret can also be read from a file by appending `_FILE` to its name (e.g. `SECRET_KEY_FILE=/run/secrets/taplist_secret_key`), which works well with Docker secrets.
 
+## Database
+The beverages are stored in a database. Images, the background and the favicon stay in the mount folder, the database only stores the path of the image.
+
+By default a SQLite database is used, stored as `taplist.db` in the mount folder. Nothing has to be configured for it. When `POSTGRES_HOST` is set, PostgreSQL is used instead:
+- **SQLITE_PATH**: Location of the SQLite database file. Default value is `mount/taplist.db`.
+- **POSTGRES_HOST**: Host of the PostgreSQL server. Setting it switches the app to PostgreSQL.
+- **POSTGRES_PORT**: Default value is 5432.
+- **POSTGRES_DB**: Name of the database. Default value is taplist.
+- **POSTGRES_USER**: Default value is taplist.
+- **POSTGRES_PASSWORD**: Password of the database user (or `POSTGRES_PASSWORD_FILE`).
+- **POSTGRES_SSLMODE**: Optional libpq SSL mode, e.g. `require` or `verify-full`.
+
+The table is created on the first start. At startup the app waits up to 20 seconds for the database to become reachable. Every beverage gets a generated unique ID, so two beverages can have the same name.
+
+### Migrating from `drinks.json`
+If a `drinks.json` is found in the mount folder and the database is still empty, its beverages are imported on start and the file is renamed to `drinks.json.migrated`. Keep it as a backup, or delete it once everything looks right.
+
 ## Beverage Attributes
 These are the attributes that can be configured for all the beverages. Values entered on the admin page are validated, and the allowed ranges are shown in brackets.
 - **number**: Sets the number for the beer. It can show the tap number the beers is on or the number on top of the bottle cap. This is also used to order the beverages. For spirits this value is not shown. Required for taps; adding a tap with an existing number replaces that tap. [0–99999]
-- **color**: The color of the beer in SRM value. The beer cards color will be set to this color, if no color is set then the default grey `#333333` one will be used. When editing `drinks.json` by hand a hex color (`#rrggbb`) can also be given. [0–50]
+- **color**: The color of the beer in SRM value. The beer cards color will be set to this color, if no color is set then the default grey `#333333` one will be used. Hex colors (`#rrggbb`) set by hand in the old `drinks.json` are kept in the `color_hex` column. [0–50]
 - **abv**: The alcohol by volume value. [0–100]
 - **ibu**: Bitterness of the beer, ignored for spirits. [0–1000]
-- **image**: Path of the image file for intended use should start with `/mount/`, however I intentionally left it to full path for more flexibility. Only image files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) are served from `/mount`, and the admin page only ever deletes images under `/mount/img/`.
+- **image**: Path of the image file for intended use should start with `/mount/`, however I intentionally left it to full path for more flexibility. Images uploaded on the admin page are stored as `/mount/img/<ID>.<ext>`. Only image files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) are served from `/mount`, and the admin page only ever deletes images under `/mount/img/`.
 - **name**: Name of the beverage. [max. 200 characters]
 - **style**: Style of the beverage. [max. 200 characters]
 - **info**: Extra information shown on the card. [max. 1000 characters]
@@ -32,7 +49,7 @@ These are the attributes that can be configured for all the beverages. Values en
 - **untappd**: Link to the Untappd page of the beverage. Must be an `untappd.com` link.
 
 ## Usage
-I would recommend using the already published [docker image](https://hub.docker.com/repository/docker/kreutzakos/homebrew-taplist). When running this image, the only thing to ensure is that the mount folder is mounted so the custom images and json file can be read by the application. This also allows updating the taplist without any need to restart or rebuild the image.
+I would recommend using the already published [docker image](https://hub.docker.com/repository/docker/kreutzakos/homebrew-taplist). When running this image, the only thing to ensure is that the mount folder is mounted so the custom images and the SQLite database are kept outside of the container. This also allows updating the taplist without any need to restart or rebuild the image.
 
 The container runs as an unprivileged user (UID/GID `10001`) and listens on port **8080**. The mounted folder must be writable by that user:
 
@@ -92,6 +109,43 @@ secrets:
     file: ./secrets/secret_key.txt
 ```
 
+### Docker Compose with PostgreSQL
+Add a database service and point the app to it. The mount folder is still needed for the images.
+
+```yaml
+services:
+  taplist:
+    # ... same as above, plus:
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_pass
+    secrets: [admin_pass, secret_key, db_pass]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: taplist
+      POSTGRES_DB: taplist
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_pass
+    secrets: [db_pass]
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "taplist"]
+      interval: 5s
+
+volumes:
+  db-data:
+
+secrets:
+  db_pass:
+    file: ./secrets/db_pass.txt
+```
+
 ### HTTPS
 The app itself speaks plain HTTP. Even on a home network it is worth putting a TLS reverse proxy in front of it, so the admin password and session cookie are never sent unencrypted. Example with [Caddy](https://caddyserver.com/) (uses its own local CA for `.lan`/`localhost` names, or Let's Encrypt for public domains):
 
@@ -118,6 +172,7 @@ The image has a `HEALTHCHECK`, so `docker ps` shows whether the app is healthy.
 The image has no shell, so `docker exec -it taplist sh` does not work. Instead:
 - Check the logs with `docker logs taplist`. Gunicorn writes every request to the log.
 - Run Python inside the container, e.g. `docker exec taplist python3 -c "import os; print(os.listdir('/app/mount'))"`.
+- Query the SQLite database, e.g. `docker exec taplist python3 -c "import sqlite3; print(sqlite3.connect('/app/mount/taplist.db').execute('select category, name from beverages').fetchall())"`.
 - Attach a temporary tool container that shares the app's processes and network: `docker run --rm -it --pid=container:taplist --network=container:taplist busybox`.
 
 ## Development

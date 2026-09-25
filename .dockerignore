@@ -11,3 +11,6 @@ requirements.in
 **/*.pyc
 .env
 *.env
+mount/*.db
+mount/*.db-*
+mount/drinks.json*

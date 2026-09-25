@@ -3,8 +3,9 @@ import io
 import hmac
 import math
 import secrets
-import tempfile
 import threading
+import time
+import uuid
 from datetime import timedelta
 from pathlib import Path
 import re
@@ -24,6 +25,11 @@ from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from PIL import Image
+from sqlalchemy import (
+    create_engine, MetaData, Table, Column,
+    String, Integer, Float, Text, URL, select, delete, func
+)
+from sqlalchemy.exc import OperationalError
 
 # --------------------
 # Secrets
@@ -92,7 +98,8 @@ Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 SRM_FILE = Path("srm_colors.json")
 
 MOUNT_DIR = Path("mount")
-DRINKS_FILE = MOUNT_DIR / "drinks.json"
+LEGACY_DRINKS_FILE = MOUNT_DIR / "drinks.json"
+DEFAULT_SQLITE_FILE = MOUNT_DIR / "taplist.db"
 IMG_DIR = MOUNT_DIR / "img"
 IMG_URL_PREFIX = "/mount/img/"
 BACKGROUND_FILE = MOUNT_DIR / "background.png"
@@ -112,8 +119,8 @@ NUMERIC_FIELDS = {
 MAX_TEXT_LENGTH = 200
 MAX_INFO_LENGTH = 1000
 
-# Serializes read-modify-write of drinks.json across gunicorn threads
-DRINKS_LOCK = threading.Lock()
+# Serializes add/delete (tap override, image cleanup) across gunicorn threads
+WRITE_LOCK = threading.Lock()
 
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB limit
 
@@ -166,6 +173,148 @@ def set_security_headers(response):
     return response
 
 # --------------------
+# Database
+# --------------------
+
+def build_database_url():
+    """
+    PostgreSQL when POSTGRES_HOST is set, otherwise a SQLite file in the
+    mount folder (SQLITE_PATH overrides its location).
+    """
+    host = os.environ.get("POSTGRES_HOST", "").strip()
+
+    if not host:
+        sqlite_path = os.environ.get("SQLITE_PATH", "").strip() or str(DEFAULT_SQLITE_FILE)
+        return URL.create("sqlite", database=sqlite_path)
+
+    return URL.create(
+        "postgresql+psycopg",
+        username=os.environ.get("POSTGRES_USER", "taplist"),
+        password=get_secret("POSTGRES_PASSWORD", required=False),
+        host=host,
+        port=int(os.environ.get("POSTGRES_PORT", "5432")),
+        database=os.environ.get("POSTGRES_DB", "taplist"),
+    )
+
+def build_connect_args(url):
+    if url.get_backend_name() == "postgresql":
+        args = {"connect_timeout": 5}
+        sslmode = os.environ.get("POSTGRES_SSLMODE", "").strip()
+        if sslmode:
+            args["sslmode"] = sslmode
+        return args
+    return {}
+
+def wait_for_database(timeout=20):
+    """
+    The database container may still be starting (e.g. with Docker Compose),
+    so retry for a while. Stays below gunicorn's 30s worker boot timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with engine.connect():
+                return
+        except OperationalError as e:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Could not connect to the database: {e.orig or e}"
+                ) from None
+            app.logger.warning("Database not reachable yet, retrying")
+            time.sleep(2)
+
+DATABASE_URL = build_database_url()
+engine = create_engine(
+    DATABASE_URL,
+    connect_args=build_connect_args(DATABASE_URL),
+    pool_pre_ping=True,
+)
+
+metadata = MetaData()
+
+beverages = Table(
+    "beverages", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("category", String(20), nullable=False, index=True),
+    Column("name", Text, nullable=False),
+    Column("style", Text),
+    Column("info", Text),
+    Column("untappd", Text),
+    Column("image", Text),
+    Column("number", Integer),
+    Column("abv", Float),
+    Column("color", Float),  # SRM
+    Column("color_hex", String(7)),  # only set by the drinks.json import
+    Column("ibu", Integer),
+    Column("kcal", Integer),
+)
+
+def new_id():
+    return str(uuid.uuid4())
+
+def import_legacy_drinks():
+    """
+    One-time import of a 1.x/2.0 drinks.json into an empty database. The file
+    is renamed afterwards so it is not imported again.
+    """
+    if not LEGACY_DRINKS_FILE.exists():
+        return
+
+    with engine.begin() as conn:
+        if conn.execute(select(func.count()).select_from(beverages)).scalar():
+            app.logger.warning(
+                "%s ignored: the database already contains beverages", LEGACY_DRINKS_FILE
+            )
+            return
+
+        data = json.loads(LEGACY_DRINKS_FILE.read_text())
+        rows = []
+
+        for category in BEVERAGE_CATEGORIES:
+            for item in data.get(category, []):
+                row = {"id": new_id(), "category": category, "color_hex": None}
+
+                for column in ("name", "style", "info", "untappd", "image"):
+                    row[column] = item.get(column)
+                for field in NUMERIC_FIELDS:
+                    value = item.get(field)
+                    row[field] = value if isinstance(value, (int, float)) else None
+
+                # Legacy "srm" field, and hex colors that could only be set by hand
+                color = item.get("color")
+                if row["color"] is None and isinstance(item.get("srm"), (int, float)):
+                    row["color"] = item["srm"]
+                elif isinstance(color, str) and HEX_COLOR_RE.fullmatch(color):
+                    row["color_hex"] = color
+
+                if row["name"]:
+                    rows.append(row)
+
+        if rows:
+            conn.execute(beverages.insert(), rows)
+
+    LEGACY_DRINKS_FILE.rename(LEGACY_DRINKS_FILE.with_name("drinks.json.migrated"))
+    app.logger.warning(
+        "Imported %d beverages from %s into the database", len(rows), LEGACY_DRINKS_FILE
+    )
+
+wait_for_database()
+metadata.create_all(engine)
+import_legacy_drinks()
+
+def load_drinks():
+    """All beverages grouped by category."""
+    with engine.connect() as conn:
+        rows = conn.execute(select(beverages)).mappings().all()
+
+    data = {category: [] for category in BEVERAGE_CATEGORIES}
+    for row in rows:
+        if row["category"] in data:
+            data[row["category"]].append(dict(row))
+
+    return data
+
+# --------------------
 # Authentication Setup
 # --------------------
 
@@ -198,17 +347,15 @@ def load_user(user_id):
 
 @app.route("/")
 def index():
-    with DRINKS_FILE.open() as f:
-        data = json.load(f)
-
+    data = load_drinks()
     srm_map = load_srm_map()
 
-    for section in ("taps", "bottles", "spirits"):
-        items = data.get(section, [])
-
+    for section, items in data.items():
         normalized = [normalize_drink(item, srm_map) for item in items]
 
-        normalized.sort(key=lambda x: x.get("number", 9999))
+        normalized.sort(key=lambda x: (
+            x["number"] if x["number"] is not None else 9999, x["name"].lower()
+        ))
         data[section] = normalized
 
     return render_template("index.html", data=data)
@@ -271,31 +418,22 @@ def admin():
 @app.route("/admin/delete_item", methods=["POST"])
 @login_required
 def delete_item():
-    category = request.form.get("category")
-    name = request.form.get("name")
+    item_id = request.form.get("id", "")
 
-    if category not in BEVERAGE_CATEGORIES:
-        flash("Invalid category")
-        return redirect(url_for("admin"))
-
-    with DRINKS_LOCK:
-        data = load_drinks()
-
-        # ---- Remove item and capture its image path ----
-        removed = [item for item in data[category] if item.get("name") == name]
+    with WRITE_LOCK:
+        with engine.begin() as conn:
+            removed = conn.execute(
+                delete(beverages)
+                .where(beverages.c.id == item_id)
+                .returning(beverages.c.image)
+            ).all()
 
         if not removed:
             flash("Item not found")
             return redirect(url_for("admin"))
 
-        data[category] = [
-            item for item in data[category] if item.get("name") != name
-        ]
-
-        save_drinks(data)
-
-        for item in removed:
-            delete_image_if_unused(data, item.get("image"))
+        for (image,) in removed:
+            delete_image_if_unused(image)
 
     flash("Item deleted")
 
@@ -350,62 +488,45 @@ def add_item():
         flash("Image content is invalid or does not match its extension")
         return redirect(url_for("admin"))
 
-    # ---- Generate safe filename from beverage name ----
-    # Normalize, replace whitespace with underscore,
-    # remove non-alphanumeric (keep underscore and dash)
-    safe_name = re.sub(r"\s+", "_", name.lower())
-    safe_name = re.sub(r"[^a-z0-9_-]", "", safe_name)
-
-    if not safe_name:
-        flash("Invalid beverage name")
-        return redirect(url_for("admin"))
-
     # ---------- Build Item ----------
-    item = {"name": name, "style": style}
+    # The image is named after the beverage's ID, so it never collides
+    item_id = new_id()
+    filename = f"{item_id}{original_ext}"
 
-    if untappd:
-        item["untappd"] = untappd
+    item = {
+        "id": item_id,
+        "category": category,
+        "name": name,
+        "style": style,
+        "info": info,
+        "untappd": untappd,
+        "image": f"{IMG_URL_PREFIX}{filename}",
+        **numbers,
+    }
 
-    if info:
-        item["info"] = info
+    with WRITE_LOCK:
+        (IMG_DIR / filename).write_bytes(image_bytes)
 
-    for field, value in numbers.items():
-        if value is not None:
-            item[field] = value
+        try:
+            with engine.begin() as conn:
+                # ---------- Tap Override ----------
+                replaced_images = []
+                if category == "taps":
+                    replaced_images = conn.execute(
+                        delete(beverages)
+                        .where(beverages.c.category == "taps")
+                        .where(beverages.c.number == item["number"])
+                        .returning(beverages.c.image)
+                    ).scalars().all()
 
-    with DRINKS_LOCK:
-        # ---- Prevent overwrite by adding suffix ----
-        filename = f"{safe_name}{original_ext}"
-        save_path = IMG_DIR / filename
-        counter = 1
-        while save_path.exists():
-            filename = f"{safe_name}_{counter}{original_ext}"
-            save_path = IMG_DIR / filename
-            counter += 1
-
-        save_path.write_bytes(image_bytes)
-        item["image"] = f"{IMG_URL_PREFIX}{filename}"
-
-        data = load_drinks()
-
-        # ---------- Tap Override ----------
-        replaced_images = []
-        if category == "taps":
-            replaced_images = [
-                t.get("image") for t in data["taps"]
-                if t.get("number") == item["number"]
-            ]
-            data["taps"] = [
-                t for t in data["taps"]
-                if t.get("number") != item["number"]
-            ]
-
-        data[category].append(item)
-        save_drinks(data)
+                conn.execute(beverages.insert().values(**item))
+        except Exception:
+            (IMG_DIR / filename).unlink(missing_ok=True)
+            raise
 
         # Only remove the old tap's image if no other item still uses it
         for image in replaced_images:
-            delete_image_if_unused(data, image)
+            delete_image_if_unused(image)
 
     flash("Item added successfully")
 
@@ -463,7 +584,7 @@ def update_favicon():
 
 @app.route("/mount/<path:filename>")
 def mounted_files(filename):
-    # Only serve images; keeps drinks.json and anything else in mount/ private
+    # Only serve images; keeps the SQLite database and anything else in mount/ private
     if Path(filename).suffix.lower() not in ALLOWED_IMAGE_EXTENSIONS:
         abort(404)
     return send_from_directory(MOUNT_DIR, filename)
@@ -500,34 +621,7 @@ def sanitize_image(file_storage, expected_format):
     except (Image.DecompressionBombError, OSError, SyntaxError, ValueError):
         return None
 
-def load_drinks():
-    with open(DRINKS_FILE, "r") as f:
-        return json.load(f)
-
-def save_drinks(data):
-    """
-    Write drinks.json atomically: write a temp file in the same directory,
-    then rename it over the original so readers never see a partial file.
-    """
-    fd, tmp_path = tempfile.mkstemp(
-        dir=DRINKS_FILE.parent, prefix=".drinks-", suffix=".json.tmp"
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-
-        # mkstemp creates the file as 0600, keep the original permissions
-        if DRINKS_FILE.exists():
-            os.chmod(tmp_path, DRINKS_FILE.stat().st_mode & 0o777)
-
-        os.replace(tmp_path, DRINKS_FILE)
-    except BaseException:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
-
-def delete_image_if_unused(data, image):
+def delete_image_if_unused(image):
     """
     Delete an uploaded image unless another beverage still references it.
     Only files the admin page uploaded (under /mount/img/) are ever removed.
@@ -535,11 +629,12 @@ def delete_image_if_unused(data, image):
     if not image or not image.startswith(IMG_URL_PREFIX):
         return
 
-    if any(
-        item.get("image") == image
-        for category in BEVERAGE_CATEGORIES
-        for item in data.get(category, [])
-    ):
+    with engine.connect() as conn:
+        still_used = conn.execute(
+            select(beverages.c.id).where(beverages.c.image == image).limit(1)
+        ).first()
+
+    if still_used:
         return
 
     file_path = IMG_DIR / Path(image).name
@@ -606,12 +701,12 @@ def is_safe_untappd_url(url):
 def normalize_drink(d, srm_map):
     d["display_ibu"] = d.get("ibu")
 
-    # drinks.json can also be edited by hand, so re-check links on render
+    # The database can also be edited by hand, so re-check links on render
     if d.get("untappd") and not is_safe_untappd_url(d["untappd"]):
         d["untappd"] = None
 
     color_field = d.get("color")
-    srm_field = d.get("srm")
+    hex_field = d.get("color_hex")
 
     color_hex = None
     display_srm = None
@@ -620,12 +715,8 @@ def normalize_drink(d, srm_map):
         display_srm = float(color_field)
         color_hex = srm_to_hex(display_srm, srm_map)
 
-    elif isinstance(srm_field, (int, float)):
-        display_srm = float(srm_field)
-        color_hex = srm_to_hex(display_srm, srm_map)
-
-    elif isinstance(color_field, str) and HEX_COLOR_RE.fullmatch(color_field):
-        color_hex = color_field
+    elif isinstance(hex_field, str) and HEX_COLOR_RE.fullmatch(hex_field):
+        color_hex = hex_field
 
     if not color_hex:
         color_hex = "#333333"

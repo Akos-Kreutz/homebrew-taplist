@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.1
+
+Beverages are stored in a database instead of `drinks.json`.
+
+### Changes
+
+- **SQLite by default, PostgreSQL optional.** Without configuration the beverages are stored in `mount/taplist.db`.
+  Setting `POSTGRES_HOST` (plus `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`/`POSTGRES_PASSWORD_FILE`,
+  `POSTGRES_SSLMODE`) switches to PostgreSQL. `SQLITE_PATH` changes the location of the SQLite file.
+- **Unique IDs.** Every beverage gets a generated UUID. The beverage name is no longer used as an identifier, so
+  duplicate names are allowed, and the admin page deletes beverages by ID (taps and bottles are listed with their number).
+- **Image names.** Uploaded images are stored as `/mount/img/<ID>.<ext>` instead of a name derived from the beverage name.
+  Images stay in the mount folder, the database only stores their path.
+- **Automatic migration.** An existing `drinks.json` is imported into an empty database on start and renamed to
+  `drinks.json.migrated`. The legacy `srm` field and hand-set hex colors are carried over.
+- The app waits up to 20 seconds for the database at startup and fails with a clear error if it stays unreachable.
+- The sample `mount/drinks.json` was removed from the repository and image.
+- New dependencies: `sqlalchemy` and `psycopg[binary]`.
+
+### Security notes
+
+- All queries go through SQLAlchemy with bound parameters. The PostgreSQL password can be passed as a file (Docker secret)
+  and TLS can be required with `POSTGRES_SSLMODE`.
+- `/mount` still only serves image files, so `taplist.db` and `drinks.json.migrated` are not publicly reachable.
+- Deleting uses the ID from the form, and images are still only removed from `/mount/img/` when no other beverage uses them.
+
 ## 2.0
 
 Security hardening release. The application, the container image and the way it is run were reworked

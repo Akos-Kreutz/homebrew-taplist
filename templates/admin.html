@@ -128,8 +128,7 @@
 
                 <div class="mb-3">
                     <label class="form-label">Category</label>
-                    <select name="category"
-                            id="delete-category"
+                    <select id="delete-category"
                             class="form-select"
                             required>
                         <option value="taps">Taps</option>
@@ -140,7 +139,7 @@
 
                 <div class="mb-3">
                     <label class="form-label">Name</label>
-                    <select name="name"
+                    <select name="id"
                             id="delete-name"
                             class="form-select"
                             required>
@@ -227,8 +226,10 @@
 
         drinks[category].forEach(item => {
             const option = document.createElement("option");
-            option.value = item.name;
-            option.textContent = item.name;
+            option.value = item.id;
+            option.textContent = item.number != null && category !== "spirits"
+                ? `${item.number} - ${item.name}`
+                : item.name;
             nameSelect.appendChild(option);
         });
     }

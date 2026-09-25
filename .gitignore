@@ -1,0 +1,10 @@
+# Local database and migrated data
+mount/*.db
+mount/*.db-*
+mount/drinks.json*
+
+# Python bytecode
+__pycache__/
+
+# Claude Code
+.claude
