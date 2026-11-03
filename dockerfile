@@ -1,4 +1,4 @@
-FROM python:3.14-alpine AS builder
+FROM python:3.15-alpine AS builder
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ RUN python3 -m compileall -q /app && chown -R 10001:10001 /app/mount && rm requi
 
 ## ----- ##
 
-FROM python:3.14-alpine
+FROM python:3.15-alpine
 
 WORKDIR /app
 
