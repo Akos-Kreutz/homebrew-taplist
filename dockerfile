@@ -28,11 +28,11 @@ COPY --from=builder /app /app
 # Remove the package manager (keep /lib/apk/db so scanners still see packages) and pip
 RUN apk --no-cache upgrade \
     && apk del --purge apk-tools \
-    && rm -rf /usr/local/bin/pip* /usr/local/lib/python3.14/site-packages/pip* \
-              /usr/local/lib/python3.14/ensurepip /usr/local/lib/python3.14/idlelib /var/cache/apk /etc/apk
+    && rm -rf /usr/local/bin/pip* /usr/local/lib/python3.15/site-packages/pip* \
+              /usr/local/lib/python3.15/ensurepip /usr/local/lib/python3.15/idlelib /var/cache/apk /etc/apk
 
-# Remove busybox (shell + ~300 applets) last, running it directly because /bin/sh goes away
-RUN ["/bin/busybox", "sh", "-c", "for l in $(/bin/busybox find / -xdev -type l); do [ \"$(/bin/busybox readlink $l)\" = /bin/busybox ] && /bin/busybox rm -f $l; done; /bin/busybox rm -f /bin/busybox"]
+# Remove busybox (shell + ~300 applets) and its apk db entries last, running it directly because /bin/sh goes away
+RUN ["/bin/busybox", "sh", "-c", "for l in $(/bin/busybox find / -xdev -type l); do [ \"$(/bin/busybox readlink $l)\" = /bin/busybox ] && /bin/busybox rm -f $l; done; /bin/busybox sed -i '/^P:busybox/,/^$/d' /lib/apk/db/installed; /bin/busybox rm -f /bin/busybox"]
 
 USER 10001:10001
 
